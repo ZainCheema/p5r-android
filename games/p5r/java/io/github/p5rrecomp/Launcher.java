@@ -13,6 +13,7 @@ import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.Point;
 import android.graphics.Typeface;
 import android.graphics.drawable.Icon;
 import android.net.Uri;
@@ -58,6 +59,9 @@ import java.util.Map;
  *   frame rate  30 (NX_FPS_CAP=30, default) or 60 (NX_FPS_CAP=60: games/p5r/game.cpp patches the engine's interval)
  *   FPS counter off (default) or on (NX_SHOW_FPS)
  *   shadows     off (NX_SHADOWS=0, default: the shadow maps are not drawn, ~9% of the GPU on the 3D title) or on
+ *   screen shape 16:9 with bars (NX_TALL=0, default) or, on a screen narrower than 16:9 (4:3, 16:10), filling it
+ *               (NX_TALL=auto, experimental: taller render targets and a 4:3 camera, docs/nvn/studies/tall-4x3.md; the
+ *               display's size goes to the runtime as NX_TALL_SCREEN)
  *   on-screen controls on (default) or off (NX_TOUCH_SHOW), their size (NX_TOUCH_SIZE) and opacity (NX_TOUCH_OPACITY),
  *               and where they are (NX_TOUCH_LAYOUT, written by ControlsEditor)
  * and imports or exports the saves (user/save, SaveFiles.java): a ZIP or a folder in, a ZIP in Download out.
@@ -206,6 +210,27 @@ public class Launcher extends Activity {
         startActivityForResult(i, PREPARE);
     }
 
+    // NX_TALL=auto (the "Screen shape" option): the display's size, so the runtime knows the shape before the game's
+    // window exists (same process: the NativeActivity runs in the launcher's).
+    void screenShapeForRuntime() {
+        try {
+            int w, h;
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Rect b = getWindowManager().getMaximumWindowMetrics().getBounds();
+                w = b.width();
+                h = b.height();
+            } else {
+                Point p = new Point();
+                getWindowManager().getDefaultDisplay().getRealSize(p);
+                w = p.x;
+                h = p.y;
+            }
+            if (w > 0 && h > 0) Os.setenv("NX_TALL_SCREEN", Math.max(w, h) + "x" + Math.min(w, h), true);
+        } catch (Exception e) {
+            // the runtime then asks the window
+        }
+    }
+
     // The runtime reads the game from this descriptor (same process: the NativeActivity runs in the launcher's).
     boolean openGameForRuntime() {
         try {
@@ -283,6 +308,7 @@ public class Launcher extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        screenShapeForRuntime();
         // The game's texts and subtitles (runtime language.h): its own language names, as a console lists them.
         options.add(new Option("language", "Idioma de textos y subtítulos", "Text and subtitle language",
                 new String[] {"auto", "en-US", "es", "fr", "de", "it", "ja", "ko", "zh-Hans", "zh-Hant"},
@@ -301,6 +327,9 @@ public class Launcher extends Activity {
                 new String[] {"30 fps", "60 fps (experimental)"}, new String[] {"30 fps", "60 fps (experimental)"}, 0));
         options.add(new Option("NX_SHADOWS", "Sombras", "Shadows", new String[] {"0", "1"},
                 new String[] {"Desactivadas", "Activadas"}, new String[] {"Off", "On"}, 0));
+        options.add(new Option("NX_TALL", "Forma de la pantalla", "Screen shape", new String[] {"0", "auto"},
+                new String[] {"16:9 (con bandas)", "Llenar pantallas 4:3 y 16:10 (experimental)"},
+                new String[] {"16:9 (with bars)", "Fill 4:3 and 16:10 screens (experimental)"}, 0));
         options.add(new Option("NX_SHOW_FPS", "Contador de FPS", "FPS counter", new String[] {"0", "1"},
                 new String[] {"Desactivado", "Activado"}, new String[] {"Off", "On"}, 0));
         options.add(new Option("NX_TOUCH_SHOW", "Controles táctiles", "On-screen controls", new String[] {"1", "0"},

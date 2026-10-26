@@ -20,6 +20,7 @@
 #include <tuple>
 #include <vector>
 
+#include "nvn_ultrawide.h"
 #include "nvn_vk.h"
 #include "platform.h"
 
@@ -758,6 +759,12 @@ void gpu_present(uint64_t texture, const int32_t* crop, uint64_t origin_ns) {
         hud_crop[0] = hud_up(crop[0]), hud_crop[1] = hud_up(crop[1]);
         hud_crop[2] = hud_up_end(crop[0] + crop[2]) - hud_crop[0], hud_crop[3] = hud_up_end(crop[1] + crop[3]) - hud_crop[1];
         crop = hud_crop;
+    }
+    int32_t tall_crop[4];  // NX_TALL: the window texture is taller than its guest size, and so is the crop
+    if (src && src->tall && crop) {
+        const int32_t y1 = tall_up_end(crop[1] + crop[3]);
+        tall_crop[0] = crop[0], tall_crop[2] = crop[2], tall_crop[1] = tall_up(crop[1]), tall_crop[3] = y1 - tall_crop[1];
+        crop = tall_crop;
     }
     GpuImage dst;
     dst.image = g_sc_images[index];

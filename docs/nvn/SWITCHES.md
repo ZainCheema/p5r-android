@@ -44,6 +44,9 @@ README.
 | `NX_UW_UI=learn` | with `NX_ULTRAWIDE`: squeeze only the vertex shaders seen drawing into BGRA8 UI layer targets, not every draw without depth test | nvn_draw.cpp |
 | `NX_UW_NOSCALE=<hash>,..` / `NX_UW_SCALE=<hash>,..` | with `NX_ULTRAWIDE`: vertex shaders never / only these are squeezed | nvn_ultrawide.cpp |
 | `NX_UW_TRACE=<first>:<count>` | with `NX_ULTRAWIDE`: one `uwdraw` line per draw (shaders, count, target, depth/blend, viewport, whether squeezed) | nvn_draw.cpp |
+| `NX_TALL=auto\|<a>:<b>\|<w>x<h>` | narrow screens (4:3, 16:10): the 16:9 render targets' images made taller, viewports, scissors, copies, clears and the window crop scaled in y, the 2D squeezed back into a centred 16:9 band; P5R's cameras made 4:3 (Vert+, heap scan, games/p5r/game.cpp). `auto`: `NX_TALL_SCREEN` (the launcher's display size) or the window's. 16:9 and wider: off. docs/nvn/studies/tall-4x3.md | nvn_ultrawide.cpp, nvn_draw.cpp, nvn_image.cpp |
+| `NX_TALL_UI=<w>x<h>,..` / `NX_TALL_FILL=untextured` / `NX_TALL_FLAGS0=1` | with `NX_TALL`: the frame targets whose draws are squeezed (default 1280x720,1920x1080); fades not squeezed; flag-less 16:9 textures taller too | nvn_ultrawide.cpp, nvn_draw.cpp |
+| `NX_P5R_TALL_CAMERA=0` / `NX_P5R_TALL_FOV=0` / `NX_P5R_CAM_FOV=<bytes>` / `NX_P5R_CAM_SCAN_MS=<ms>` | with `NX_TALL`, P5R: no camera patch; aspect only (Hor-); the field of view's offset from the aspect (-4); the scan's period (3000) | games/p5r/game.cpp |
 | `NX_UW_SCAN=<present>` | once: where guest memory holds 16/9, 9/16, 1920x1080, 1280x720 (heap and main's data), with context (`uwscan` lines) | nvn_ultrawide.cpp |
 
 Always on: every 60 presents `nvn/vk: per frame over 60: submits, replay ms (host), GPU wait ms, present wait ms,

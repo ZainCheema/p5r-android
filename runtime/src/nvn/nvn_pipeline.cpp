@@ -99,7 +99,7 @@ VkShaderModule module_of(const ShaderInfo* s, const uint8_t* kinds = nullptr, ui
         bool is_patched = false;
         const uint8_t* int_kinds = k != std::string(16, '\0') ? reinterpret_cast<const uint8_t*>(k.data()) : nullptr;
         std::vector<uint32_t> code = patched_spirv(s, int_kinds, unwritten, &is_patched);
-        if (s->stage == ShaderStage::Vertex && uw_on()) {  // NX_ULTRAWIDE: gl_Position.x * spec constant 0
+        if (s->stage == ShaderStage::Vertex && (uw_on() || tall_on())) {  // NX_ULTRAWIDE / NX_TALL: x * constant 0, y * 1
             std::vector<uint32_t> scaled;
             if (patch_x_scale(code, scaled)) code.swap(scaled);
             else log("nvn/vk: shader %s: ultrawide x scale not patched", s->hash.c_str());
@@ -726,6 +726,7 @@ PipelineKey canonical_key(const PipelineKey& in) {
     k.depth_clamp = in.depth_clamp && vk_features().depthClamp ? 1 : 0;
     k.alpha_to_coverage = in.alpha_to_coverage ? 1 : 0;
     k.uw_x = in.uw_x;
+    k.uw_axis = in.uw_axis;
     return k;
 }
 
@@ -764,9 +765,9 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
         st.stage = VkShaderStageFlagBits(stage_bit(s->stage));
         st.module = module_of(s, s == key.vs ? int_kinds : nullptr, s == key.fs ? unwritten : 0);
         st.pName = "main";
-        if (s == key.vs && key.uw_x > 0) {  // NX_ULTRAWIDE: constant 0 of the patched vertex module
-            static VkSpecializationMapEntry entry{0, 0, sizeof(float)};
-            spec_info = {1, &entry, sizeof(float), &uw_x_value};
+        if (s == key.vs && key.uw_x > 0) {  // NX_ULTRAWIDE: constant 0 of the patched vertex module (NX_TALL: 1)
+            static VkSpecializationMapEntry entry_x{0, 0, sizeof(float)}, entry_y{1, 0, sizeof(float)};
+            spec_info = {1, key.uw_axis ? &entry_y : &entry_x, sizeof(float), &uw_x_value};
             uw_x_value = key.uw_x;
             st.pSpecializationInfo = &spec_info;
         }
@@ -1031,7 +1032,7 @@ static bool tex_audit(const Texture& t, GpuImage& img, bool uploading) {
         const char* e = std::getenv("NX_TEX_AUDIT");
         return e ? std::atoi(e) : 0;
     }();
-    if (!level || t.stride || img.rendered || img.hud || !t.memory || !t.storage_size) return false;
+    if (!level || t.stride || img.rendered || img.hud || img.tall || !t.memory || !t.storage_size) return false;
     static const uint64_t budget = [] {
         const char* e = std::getenv("NX_TEX_AUDIT_MB");
         return (e ? std::strtoull(e, nullptr, 10) : 24) << 20;
@@ -1076,7 +1077,7 @@ GpuImage* ensure_contents(VkCommandBuffer cb, uint64_t texture) {
     if (dirty_hi <= dirty_lo) dirty_lo = 0, dirty_hi = UINT64_MAX;  // marked without a range: all of it
     static const bool reupload = std::getenv("NX_TEXELS_REUPLOAD") != nullptr;  // bisecting: the old way
     bool upload = !img->rendered && (!img->uploaded || (dirty && (!img->texels || reupload)));
-    if (img->hud) upload = false;  // NX_HUD_1080: larger than its guest memory; the GPU fills it
+    if (img->hud || img->tall) upload = false;  // NX_HUD_1080 / NX_TALL: larger than its guest memory; the GPU fills it
     // A render target (COMPRESSIBLE, flag 0x8) the GPU never wrote through this image: its guest memory never holds
     // GPU output here (another target over the same memory left only stale data), so it starts cleared, not uploaded
     // (G3 cause 2, docs/nvn/DEBUG.md #50). NX_RT_UPLOAD=1: uploaded as before; NX_ALIAS_MAGENTA=1: cleared magenta.

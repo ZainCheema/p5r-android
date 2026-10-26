@@ -431,6 +431,7 @@ void build_sets(VkCommandBuffer cb, const std::vector<const ShaderInfo*>& shader
         uw_span(x, w, UINT32_MAX);
         vw = float(w);
     }
+    if (g_tall_target && g_state.has_viewport) vh *= tall_factor();  // NX_TALL: and the tall one, in y
     const float scale = g_hud_target ? hud_scale() : 1.0f;  // NX_HUD_1080: the shaders' render scale (gl_FragCoord)
     SupportBuffer sb;  // built when a binding gets a copy of its own
     bool sb_built = false;

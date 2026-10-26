@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <string>
 #include <cstring>
+#include <mutex>
 #include <set>
 
 #include "nvn_draw_state.h"
@@ -314,6 +315,7 @@ void dispatch(VkCommandBuffer cb, const Cmd& c) {
     static const bool off = std::getenv("NX_NO_COMPUTE") != nullptr;  // debug: skip compute dispatches
     if (off) return;
     g_hud_target = false;  // no render target: render scale 1 in its support buffer
+    g_tall_target = false;
     const auto* shaders = program_shaders(g_state.stage_programs[5]);
     const ShaderInfo* cs = nullptr;
     if (shaders)
@@ -612,6 +614,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     {   // NX_HUD_1080: a 1920x1080 image of a 1280x720 target (viewport, scissor and the shaders' render scale)
         GpuImage* hi = t.color_count && t.colors[0] ? image_of(t.colors[0]) : (t.depth ? image_of(t.depth) : nullptr);
         g_hud_target = hi && hi->hud;
+        g_tall_target = hi && hi->tall;  // NX_TALL: viewport, scissor and support buffer in y, the 2D squeeze
     }
     bool need_break = gathered & kNeedBreak;
     if (gathered & kSampledPending) clears_flush_reason(11), clears_flush(cb);  // cleared (and stored) before it is sampled
@@ -726,7 +729,47 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                     if (GpuImage* si = image_of(r.texture); si && si->uw) samples_wide = true;
         if (!samples_wide) key.uw_x = 1.0f / uw_factor();
     }
-    if (uw_on()) {  // NX_UW_TRACE=<first draw>:<count>: draws (wide = a widened target)
+    // NX_TALL. The world is made taller by the game's camera (games/p5r/game.cpp), so the 3D targets' draws are left
+    // as they are; the 2D drawn into the frame targets (tall_ui_target: P5R's HUD and menus, which are depth tested,
+    // so "no depth test" cannot pick them as it does for Wonder's UI) is squeezed by 1/ky into a centred 16:9 band. A
+    // short draw there that samples a tall image is a screen-space pass (the post pass bringing the 3D in, a blurred
+    // capture behind a menu): it covers the whole target. NX_TALL_FILL=untextured: short untextured draws (fades,
+    // dimming quads) are not squeezed either, so they cover the bands too (and so do untextured HUD shapes).
+    if (g_tall_target && tall_on()) {
+        const Texture* t0 = t.color_count && t.colors[0] ? get<Texture>(t.colors[0]) : nullptr;
+        const bool ui = t0 && tall_ui_target(t0->width, t0->height);
+        const uint64_t count = indexed ? uint64_t(c.i[0]) : uint64_t(c.i[1]);
+        bool fills = false;
+        if (ui && count <= 6) {
+            for (const ResolvedTexture& r : g_textures.resolved)
+                if (r.texture)
+                    if (GpuImage* si = image_of(r.texture); si && si->tall) fills = true;
+            static const bool fill_untextured = [] {
+                const char* e = std::getenv("NX_TALL_FILL");
+                return e && std::strcmp(e, "untextured") == 0;
+            }();
+            if (fill_untextured && g_textures.resolved.empty()) fills = true;
+        }
+        if (ui && !fills) key.uw_x = 1.0f / tall_factor(), key.uw_axis = 1;
+    } else if (tall_on() && t.color_count && t.colors[0]) {
+        // A draw into a target kept at 16:9 that samples a tall image (a 16:9 copy, a downsample like the depth
+        // pyramid's): fine through texture coordinates, short of the bottom through texel fetches. Each pair of
+        // shaders once, to tell them apart.
+        for (const ResolvedTexture& r : g_textures.resolved)
+            if (GpuImage* si = r.texture ? image_of(r.texture) : nullptr; si && si->tall) {
+                static std::mutex lock;
+                static std::set<std::pair<const ShaderInfo*, const ShaderInfo*>> seen;
+                std::lock_guard lk(lock);
+                if (seen.insert({vs, fs}).second && seen.size() <= 64) {
+                    const Texture* t0 = get<Texture>(t.colors[0]);
+                    log("nvn: tall: a 16:9 target (%ux%u f%x fmt%x) samples a tall image (%ux%u): vs %s fs %s",
+                        t0 ? t0->width : 0, t0 ? t0->height : 0, t0 ? t0->flags : 0, t0 ? t0->format : 0, si->width,
+                        si->height, vs->hash.c_str(), fs ? fs->hash.c_str() : "-");
+                }
+                break;
+            }
+    }
+    if (uw_on() || tall_on()) {  // NX_UW_TRACE=<first draw>:<count>: draws (wide = a widened or tall target)
         static const char* e = std::getenv("NX_UW_TRACE");
         static uint64_t from = 0, n = 0;
         static bool init = [&] { if (e) std::sscanf(e, "%lu:%lu", &from, &n); return true; }();
@@ -739,13 +782,13 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
                 GpuImage* si = r.texture ? image_of(r.texture) : nullptr;
                 char bb[48];
                 const Texture* st = r.texture ? get<Texture>(r.texture) : nullptr;
-                std::snprintf(bb, sizeof bb, " %ux%u%s(f%x,fmt%x,%llx)", si ? si->width : 0, si ? si->height : 0, si && si->uw ? "w" : "", st ? st->flags : 0, st ? st->format : 0, (unsigned long long)r.texture);
+                std::snprintf(bb, sizeof bb, " %ux%u%s(f%x,fmt%x,%llx)", si ? si->width : 0, si ? si->height : 0, si && (si->uw || si->tall) ? "w" : "", st ? st->flags : 0, st ? st->format : 0, (unsigned long long)r.texture);
                 smp += bb;
             }
             log("uwsamples:%s", smp.c_str());
             log("uwdraw %llu vs %s fs %s %s count %d tgt %ux%u fl %x fmt %x wide %d scaled %d dt %d dw %d bl %d vp %d %d %d %d", (unsigned long long)g_stats.total,
                 vs->hash.c_str(), fs ? fs->hash.c_str() : "-", indexed ? "idx" : "arr", indexed ? c.i[0] : c.i[1],
-                wi ? wi->width : 0, wi ? wi->height : 0, tx ? tx->flags : 0, wi ? wi->nvn_format : 0, g_uw_wide ? 1 : 0, key.uw_x > 0 ? 1 : 0,
+                wi ? wi->width : 0, wi ? wi->height : 0, tx ? tx->flags : 0, wi ? wi->nvn_format : 0, g_uw_wide || g_tall_target ? 1 : 0, key.uw_x > 0 ? 1 : 0,
                 g_state.depth.depth_test, g_state.depth.depth_write, g_state.color.blend_enable[0],
                 g_state.viewport[0], g_state.viewport[1], g_state.viewport[2], g_state.viewport[3]);
         }
@@ -804,6 +847,15 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             const int64_t x1 = std::min<int64_t>(hud_up_end(int32_t(sc.offset.x + int64_t(sc.extent.width))), g_pass_extent.width);
             const int64_t y1 = std::min<int64_t>(hud_up_end(int32_t(sc.offset.y + int64_t(sc.extent.height))), g_pass_extent.height);
             sc = {{x0, y0}, {uint32_t(std::max<int64_t>(0, x1 - x0)), uint32_t(std::max<int64_t>(0, y1 - y0))}};
+        }
+    }
+    if (g_tall_target) {  // NX_TALL: the guest's 16:9 pixel rows, ky each (after NX_HUD_1080's scale)
+        const float ky = tall_factor();
+        if (g_state.has_viewport) vp.y *= ky, vp.height *= ky;
+        if (g_state.has_scissor) {
+            const int32_t y0 = tall_up(sc.offset.y);
+            const int64_t y1 = std::min<int64_t>(tall_up_end(int32_t(sc.offset.y + int64_t(sc.extent.height))), g_pass_extent.height);
+            sc.offset.y = y0, sc.extent.height = uint32_t(std::max<int64_t>(0, y1 - y0));
         }
     }
     // NX_EXP_3D (an experiment, the picture breaks): on the 3D draws (depth test, a 960-wide pass) "scissor" keeps

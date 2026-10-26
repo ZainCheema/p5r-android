@@ -12,6 +12,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <nx/game.h>
@@ -21,9 +22,13 @@
 
 namespace nx {
 
+uint64_t heap_size();  // runtime kernel.h: svcSetHeapSize's current size
+
 namespace nvn {
 uint64_t presents_recorded();  // runtime nvn_state.cpp: nvnQueuePresentTexture calls so far
 void linear_write_back_pause(bool paused);  // runtime nvn_draw.cpp: no copies of linear targets back to memory
+bool tall_on();       // runtime nvn_ultrawide.cpp (NX_TALL): the render targets are made taller for a narrow screen
+float tall_factor();  // by this (4:3: 4/3)
 }
 
 const game::Info game::kInfo = {"p5r", "Persona 5 Royal", 0x01005CA01580E000ull, "io.github.p5rrecomp",
@@ -344,7 +349,10 @@ void frame_origin() {
     frame_origin_ns(origin * 10000 / 192);  // ticks (19.2 MHz) -> monotonic ns (system_tick())
 }
 
+void tall_cameras();  // NX_TALL (below)
+
 void interval_setter_hook(CPU& c) {
+    tall_cameras();
     scan_tasks();
     const uint64_t period = game_clock();
     frame_origin();
@@ -509,6 +517,195 @@ void cull_job_hook(CPU& c) {
             p[2][0], p[2][1], p[2][2], p[2][3], p[3][0], p[3][1], p[3][2], p[3][3], p[4][0], p[4][1], p[4][2], p[4][3],
             p[5][0], p[5][1], p[5][2], p[5][3]);
     }
+}
+
+// ---- NX_TALL: the cameras made 4:3 (docs/nvn/studies/tall-4x3.md) ----------------------------------------------------
+// With NX_TALL the runtime makes the 16:9 render targets taller (a 4:3 screen: 960x540 -> 960x720) and squeezes the 2D
+// into a 16:9 band; the 3D needs a camera that sees more above and below (Vert+): the aspect 16/9 / ky and a vertical
+// field of view of 2 atan(tan(fovy / 2) ky), so the horizontal view stays the game's. The game's own culling then
+// follows (its frustum comes from the camera).
+// Where the camera keeps them is not known on the Switch yet. On the PC (same GFD engine, also LP64) the camera's
+// aspect is at +0x1ac (p5rpc.ultrawide, MonoHearted), and GFD's camera data is {near, far, fovy, aspect}
+// (GFDLibrary's Camera). So: a worker thread scans the heap every NX_P5R_CAM_SCAN_MS (3000) for the aspect 16/9
+// (0x3fe38e39) right after three floats that look like near (0..100), far (near..1e6) and a field of view (radians or
+// degrees); every frame (from the interval setter below) each one found gets the 4:3 values, again whenever the game
+// writes its own back. Every new camera is logged with the words around it (`p5r tall: camera`), and when none is
+// found the plain 16/9 floats are (`p5r tall: 16/9 at`), to learn the real layout.
+// NX_P5R_CAM_FOV=<bytes>: the field of view's offset from the aspect (default -4). NX_P5R_TALL_FOV=0: the aspect alone
+// (Hor-: the same vertical view, the sides cut). NX_P5R_TALL_CAMERA=0: no camera patch (the 3D stretched).
+constexpr uint32_t kAspect169 = 0x3fe38e39u;  // 16/9 as a float (also 1920/1080, 1280/720, 960/540)
+
+float bits_f(uint32_t u) {
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+}
+
+uint32_t f_bits(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    return u;
+}
+
+int cam_fov_offset() {
+    static const int off = [] {
+        const int v = env_int("NX_P5R_CAM_FOV", -4);
+        return (v % 4 == 0 && v >= -64 && v <= 64 && v != 0) ? v : -4;
+    }();
+    return off;
+}
+
+bool plausible_fov(float f) { return std::isfinite(f) && ((f > 0.05f && f < 2.8f) || (f > 3.0f && f < 160.0f)); }
+
+// The words before the aspect: near, far, fovy (with the default layout).
+bool looks_like_camera(const uint32_t* w) {
+    const float near_ = bits_f(w[-3]), far_ = bits_f(w[-2]);
+    const float fov = bits_f(*reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(w) + cam_fov_offset()));
+    return std::isfinite(near_) && std::isfinite(far_) && near_ > 0 && near_ <= 100.0f && far_ > near_ &&
+           far_ <= 1.0e6f && plausible_fov(fov);
+}
+
+float vert_plus_fov(float fov, float ky) {
+    const bool degrees = fov > 3.0f;
+    const double rad = degrees ? double(fov) * 3.14159265358979 / 180.0 : double(fov);
+    double out = 2.0 * std::atan(std::tan(rad / 2.0) * double(ky));
+    out = std::min(out, 2.9);  // under 166 degrees
+    return float(degrees ? out * 180.0 / 3.14159265358979 : out);
+}
+
+struct TallCam {
+    uint64_t found = 0;                               // the aspect float's address, as the scan found it
+    uint64_t aspect = 0;                              // the same, 0 once given up
+    uint32_t fov_orig = 0, fov_set = 0, asp_set = 0;  // the game's field of view, and what was written (0: not yet)
+};
+uint64_t g_cam_rewrites = 0;  // the game wrote 16/9 back (each frame: it sets the camera every frame)
+std::mutex g_cam_lock;
+std::vector<uint64_t> g_cam_found;  // from the scan, not yet taken by the frame
+std::vector<uint64_t> g_cam_dropped;  // given up by the frame (something else lives there): the scan may find them again
+std::vector<TallCam> g_cams;        // the frame's (render thread only)
+
+std::string words_around(uint64_t a, int before, int after) {
+    std::string s;
+    for (int k = -before; k <= after; k++) {
+        const uint32_t u = *reinterpret_cast<const uint32_t*>(a + 4 * int64_t(k));
+        char b[48];
+        std::snprintf(b, sizeof b, " %s%g/%x", k == 0 ? "[" : "", double(bits_f(u)), u);
+        s += b;
+    }
+    return s;
+}
+
+void cam_scan_once(std::vector<uint64_t>& known, int pass) {
+    // 68 bytes of room each side: the field of view's offset (up to 64) and the logged words (8 before, 4 after).
+    const uint64_t lo = kHeapBase + 68, hi = kHeapBase + heap_size();
+    const uint64_t t0 = plat::monotonic_ns();
+    std::vector<uint64_t> fresh;
+    std::vector<uint64_t> plain;  // 16/9 floats that do not look like a camera (the first passes, for the log)
+    {
+        std::lock_guard lk(g_cam_lock);
+        for (uint64_t a : g_cam_dropped) known.erase(std::remove(known.begin(), known.end(), a), known.end());
+        g_cam_dropped.clear();
+    }
+    for (uint64_t a = lo; a + 68 <= hi; a += 4) {
+        const uint32_t* w = reinterpret_cast<const uint32_t*>(a);
+        if (*w != kAspect169) continue;
+        if (!looks_like_camera(w)) {
+            if (plain.size() < 48) plain.push_back(a);
+            continue;
+        }
+        if (std::find(known.begin(), known.end(), a) == known.end()) fresh.push_back(a);
+    }
+    const double ms = double(plat::monotonic_ns() - t0) / 1e6;
+    static int logged_cams = 0, logged_scans = 0;
+    for (uint64_t a : fresh) {
+        known.push_back(a);
+        if (logged_cams++ < 64)
+            log("p5r tall: camera at %llx (if at +0x1ac: object %llx, first word %llx):%s", (unsigned long long)a,
+                (unsigned long long)(a - 0x1ac),
+                (unsigned long long)(a - 0x1ac >= kHeapBase ? ld<uint64_t>(a - 0x1ac) : 0), words_around(a, 8, 4).c_str());
+    }
+    if (logged_scans++ < 6 || !fresh.empty())
+        log("p5r tall: camera scan %d: %.0f ms over %llu MB, %zu new, %zu in all", pass, ms,
+            (unsigned long long)((hi - lo) >> 20), fresh.size(), known.size());
+    // No camera after a while: the 16/9 floats there are, with their surroundings, once.
+    static bool plain_logged = false;
+    if (!plain_logged && known.empty() && pass >= 10) {
+        plain_logged = true;
+        log("p5r tall: no camera found after %d scans; the 16/9 floats in the heap (%zu shown):", pass, plain.size());
+        for (uint64_t a : plain) log("p5r tall: 16/9 at %llx:%s", (unsigned long long)a, words_around(a, 8, 4).c_str());
+    }
+    if (!fresh.empty()) {
+        std::lock_guard lk(g_cam_lock);
+        g_cam_found.insert(g_cam_found.end(), fresh.begin(), fresh.end());
+    }
+}
+
+void tall_cameras() {
+    if (!nvn::tall_on()) return;
+    static const bool off = env_int("NX_P5R_TALL_CAMERA", 1) == 0;
+    if (off) return;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        log("p5r tall: camera patch on (ky %.4f, fov at aspect%+d)", double(nvn::tall_factor()), cam_fov_offset());
+        std::thread([] {
+            plat::set_thread_name("p5r-camscan");
+            const int64_t period = std::clamp(env_int("NX_P5R_CAM_SCAN_MS", 3000), 500, 60000);
+            std::vector<uint64_t> known;
+            for (int pass = 1;; pass++) {
+                cam_scan_once(known, pass);
+                plat::sleep_ns(period * 1'000'000ll);
+            }
+        }).detach();
+    });
+    {
+        std::lock_guard lk(g_cam_lock);
+        for (uint64_t a : g_cam_found) g_cams.push_back({a, a});
+        g_cam_found.clear();
+    }
+    static const bool fov_on = env_int("NX_P5R_TALL_FOV", 1) != 0;
+    const float ky = nvn::tall_factor();
+    const uint32_t asp_bits = f_bits(float(16.0 / 9.0 / double(ky)));
+    static int logged = 0;
+    for (TallCam& cam : g_cams) {
+        if (!cam.aspect) continue;
+        auto* w = reinterpret_cast<volatile uint32_t*>(cam.aspect);
+        auto* fovp = reinterpret_cast<volatile uint32_t*>(cam.aspect + cam_fov_offset());
+        const uint32_t asp = *w, fov = *fovp;
+        if (asp == kAspect169) {  // new, or the game wrote its own values back: 4:3 again from its field of view
+            if (!looks_like_camera(const_cast<const uint32_t*>(w))) {
+                cam.aspect = 0;
+                continue;
+            }
+            if (cam.asp_set) g_cam_rewrites++;
+            // The aspect alone written back (our field of view still there): the game's own one is the one kept, not
+            // ours made taller again.
+            if (!cam.fov_set || fov != cam.fov_set) cam.fov_orig = fov;
+            cam.fov_set = fov_on ? f_bits(vert_plus_fov(bits_f(cam.fov_orig), ky)) : cam.fov_orig;
+            cam.asp_set = asp_bits;
+            *fovp = cam.fov_set;
+            *w = asp_bits;
+            if (logged++ < 24)
+                log("p5r tall: camera %llx: aspect %.4f -> %.4f, fov %g -> %g", (unsigned long long)cam.aspect,
+                    double(bits_f(kAspect169)), double(bits_f(asp_bits)), double(bits_f(fov)), double(bits_f(cam.fov_set)));
+        } else if (asp == cam.asp_set && fov != cam.fov_set && fov_on && plausible_fov(bits_f(fov))) {
+            // The game moved the field of view (a zoom, a cutscene's lens) and left our aspect: its new one, made taller.
+            cam.fov_orig = fov;
+            cam.fov_set = f_bits(vert_plus_fov(bits_f(fov), ky));
+            *fovp = cam.fov_set;
+        } else if (asp != cam.asp_set) {  // something else lives there now
+            cam.aspect = 0;
+        }
+    }
+    if (std::any_of(g_cams.begin(), g_cams.end(), [](const TallCam& c) { return !c.aspect; })) {
+        std::lock_guard lk(g_cam_lock);
+        for (const TallCam& c : g_cams)
+            if (!c.aspect) g_cam_dropped.push_back(c.found);
+    }
+    g_cams.erase(std::remove_if(g_cams.begin(), g_cams.end(), [](const TallCam& c) { return !c.aspect; }), g_cams.end());
+    static uint64_t frames = 0;
+    if (++frames % 300 == 0)
+        log("p5r tall: %zu cameras patched; the game wrote 16/9 back %llu times in 300 frames", g_cams.size(),
+            (unsigned long long)std::exchange(g_cam_rewrites, 0));
 }
 
 }  // namespace

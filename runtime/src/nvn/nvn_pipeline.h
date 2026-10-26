@@ -75,9 +75,15 @@ struct PipelineKey {
     uint32_t depth_clamp = 0;  // SetDepthClamp (applied only where the device has the depthClamp feature)
     uint32_t ufloat_colors = 0;  // bit k: colour target k is R11G11B10F (no alpha: destination alpha reads 1)
     uint32_t alpha_to_coverage = 0;  // BindMultisampleState (G7)
-    uint32_t restart = 0;  // primitive restart for a strip or fan (SetPrimitiveRestart; nvn_draw.cpp)
+    uint8_t restart = 0;  // primitive restart for a strip or fan (SetPrimitiveRestart; nvn_draw.cpp)
+    // NX_TALL: uw_x scales gl_Position.y instead of x (specialization constant 1). In the bytes that were restart's
+    // (a uint32_t holding 0 or 1): the key keeps its size and layout, so the saved pipeline caches stay valid.
+    uint8_t uw_axis = 0;
+    uint16_t unused = 0;
     float uw_x = 0;  // NX_ULTRAWIDE: gl_Position.x scale of the vertex stage (0: none, the module has no constant)
 };
+static_assert(sizeof(PipelineKey) % 8 == 0 && offsetof(PipelineKey, uw_x) + sizeof(float) == sizeof(PipelineKey),
+              "PipelineKey: the saved pipeline caches assume this layout");
 VkPipeline graphics_pipeline(const PipelineKey& key, const ProgramLayout& layout);
 // The pipelines an earlier session built (<pipeline cache>.keys): a canonical key with its two shaders by hash
 // (nvn_pipeline_cache.cpp). pipeline_warm_step, once per submit, compiles them on worker threads as the game loads

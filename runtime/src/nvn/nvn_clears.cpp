@@ -361,6 +361,11 @@ void draw_clear(VkCommandBuffer cb, const Targets& t, const Cmd& c) {
             uw_span(rx, rw, full.width);
             rect.offset.x = rx, rect.extent.width = uint32_t(rw);
         }
+        if (img->tall) {  // NX_TALL
+            const int32_t y0 = tall_up(rect.offset.y);
+            const int64_t y1 = std::min<int64_t>(tall_up_end(rect.offset.y + int32_t(rect.extent.height)), full.height);
+            rect.offset.y = y0, rect.extent.height = uint32_t(std::max<int64_t>(0, y1 - y0));
+        }
     }
     bool scissored =
         rect.offset.x || rect.offset.y || rect.extent.width < full.width || rect.extent.height < full.height;

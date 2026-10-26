@@ -5,6 +5,7 @@
 #include <memory>
 #include <tuple>
 
+#include "nvn_ultrawide.h"
 #include "nvn_vk.h"
 
 namespace nx::nvn {
@@ -153,6 +154,8 @@ GpuImage* image_of(uint64_t guest) {
     img->height = (t->target == 0 || t->target == 3) && !one_d ? 1u : std::max(1u, t->height);
     img->levels = std::max(1u, t->levels);
     if (hud_1080_texture(*t)) img->hud = true, img->width = uint32_t(hud_up(1280)), img->height = uint32_t(hud_up(720));
+    // NX_TALL: then taller (a 4:3 screen: 960x540 -> 960x720; with NX_HUD_1080, 1280x720 -> 1920x1080 -> 1920x1440).
+    if (tall_texture(*t)) img->tall = true, img->height = uint32_t(tall_up_end(int32_t(img->height)));
     uint32_t depth = std::max(1u, t->target == 3 && !one_d && t->depth <= 1 ? t->height : t->depth);  // GL-style layers
     bool is3d = t->target == 2, cube = t->target == 8 || t->target == 9;
     bool array = t->target == 3 || t->target == 4 || t->target == 6 || t->target == 9;

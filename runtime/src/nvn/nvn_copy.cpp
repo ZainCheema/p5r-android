@@ -14,6 +14,7 @@
 
 #include "nvn_draw_state.h"
 #include "nvn_pipeline.h"
+#include "nvn_ultrawide.h"
 #include "nvn_vk.h"
 
 namespace nx::nvn {
@@ -138,6 +139,9 @@ void replay_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
     };
     if (src->hud) hud_rect(info.src);
     if (dst->hud) hud_rect(info.dst);
+    // NX_TALL: y and height scaled on a tall image (the frame's copy into the window texture: both, a plain copy).
+    if (src->tall) tall_rect(info.src);
+    if (dst->tall) tall_rect(info.dst);
     bool same = src == dst;
     static const bool no_same = std::getenv("NX_COPY_NO_SAME_IMAGE") != nullptr;  // bisecting: the old way
     if (same && no_same) return;
@@ -220,7 +224,7 @@ void replay_buffer_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
     Texture* t = get<Texture>(c.a[1]);
     const uint8_t* src = replay::guest_bytes(c.a[0]);
     GpuImage* img = t && src ? fill_target(cb, c.a[1]) : nullptr;
-    if (img && img->hud) img = nullptr;  // NX_HUD_1080: texels at 1280x720 for a 1920x1080 image (never seen)
+    if (img && (img->hud || img->tall)) img = nullptr;  // NX_HUD_1080 / NX_TALL: texels for a smaller image (never seen)
     if (!img || !upload_region(cb, *t, *img, info.dst_view.base_level, info.dst_view.min_layer, info.dst, src)) {
         if (++failed <= 10)
             log("nvn: buffer-to-texture copy %llx -> %llx not replayed (%s)", (unsigned long long)c.a[0],
@@ -249,6 +253,7 @@ void replay_clear_texture(VkCommandBuffer cb, const Cmd& c, const CmdList& list)
         info.region[0] = hud_up(info.region[0]), info.region[1] = hud_up(info.region[1]);
         info.region[3] = x1 - info.region[0], info.region[4] = y1 - info.region[1];
     }
+    if (img->tall) tall_rect(info.region);  // NX_TALL
     const int32_t* r = info.region;
     bool whole = r[0] <= 0 && r[1] <= 0 && r[0] + r[3] >= int32_t(lw) && r[1] + r[4] >= int32_t(lh);
     static int logged = 0;

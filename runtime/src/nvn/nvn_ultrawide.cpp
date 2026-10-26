@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <numeric>
 #include <mutex>
 #include <set>
 #include <string>
@@ -284,7 +285,7 @@ bool patch_x_scale(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) 
         if (!block && w[2] == position_var && p->second == v4f) var = w[2];
     }
     if (!var) return false;
-    uint32_t spec = bound++;
+    uint32_t spec = bound++, spec_y = bound++;
     std::vector<uint32_t> globals;
     if (!ptr_v4f) ptr_v4f = bound++, globals.insert(globals.end(), {(4u << 16) | OpTypePointer, ptr_v4f, StorageOutput, v4f});
     if (block) {
@@ -292,13 +293,17 @@ bool patch_x_scale(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) 
         if (!zero) zero = bound++, globals.insert(globals.end(), {(4u << 16) | OpConstant, u32, zero, member});
     }
     globals.insert(globals.end(), {(4u << 16) | OpSpecConstant, f32, spec, 0x3f800000u});
+    globals.insert(globals.end(), {(4u << 16) | OpSpecConstant, f32, spec_y, 0x3f800000u});  // NX_TALL: y
 
     out.assign(in.begin(), in.begin() + 5);
     uint32_t function = 0;
     int returns = 0;
     for (const Inst& n : insts) {
         const uint32_t* w = &in[n.at];
-        if (n.at == first_type) out.insert(out.end(), {(4u << 16) | OpDecorate, spec, DecorationSpecId, 0u});
+        if (n.at == first_type) {
+            out.insert(out.end(), {(4u << 16) | OpDecorate, spec, DecorationSpecId, 0u});
+            out.insert(out.end(), {(4u << 16) | OpDecorate, spec_y, DecorationSpecId, 1u});
+        }
         if (n.at == first_function) out.insert(out.end(), globals.begin(), globals.end());
         if (n.op == OpFunction) function = w[2];
         if (n.op == OpReturn && function == entry) {
@@ -307,12 +312,15 @@ bool patch_x_scale(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) 
                 p = bound++;
                 out.insert(out.end(), {(5u << 16) | OpAccessChain, ptr_v4f, p, var, zero});
             }
-            uint32_t v = bound++, x = bound++, m = bound++, r = bound++;
+            uint32_t v = bound++, x = bound++, m = bound++, r = bound++, y = bound++, my = bound++, ry = bound++;
             out.insert(out.end(), {(4u << 16) | OpLoad, v4f, v, p});
             out.insert(out.end(), {(5u << 16) | OpCompositeExtract, f32, x, v, 0});
             out.insert(out.end(), {(5u << 16) | OpFMul, f32, m, x, spec});
             out.insert(out.end(), {(6u << 16) | OpCompositeInsert, v4f, r, m, v, 0});
-            out.insert(out.end(), {(3u << 16) | OpStore, p, r});
+            out.insert(out.end(), {(5u << 16) | OpCompositeExtract, f32, y, r, 1});
+            out.insert(out.end(), {(5u << 16) | OpFMul, f32, my, y, spec_y});
+            out.insert(out.end(), {(6u << 16) | OpCompositeInsert, v4f, ry, my, r, 1});
+            out.insert(out.end(), {(3u << 16) | OpStore, p, ry});
             returns++;
         }
         if (n.op == OpFunctionEnd) function = 0;
@@ -321,6 +329,121 @@ bool patch_x_scale(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) 
     if (!returns) return false;
     out[3] = bound;
     return true;
+}
+
+// ---- Narrow screens (NX_TALL) ----------------------------------------------------------------------------------------
+
+namespace {
+
+// ky = num / den = (16/9) / (a/b) = 16b / 9a, kept as a fraction so spans round the same way everywhere.
+struct TallRatio {
+    int64_t num = 1, den = 1;
+};
+
+TallRatio init_tall() {
+    TallRatio r;
+    const char* e = std::getenv("NX_TALL");
+    if (!e || !*e || e[0] == '0') return r;
+    if (uw_on()) {
+        log("nvn: tall: off, NX_ULTRAWIDE is on");
+        return r;
+    }
+    unsigned a = 0, b = 0;
+    if (std::sscanf(e, "%ux%u", &a, &b) != 2 && std::sscanf(e, "%u:%u", &a, &b) != 2) {  // "auto": the screen's, landscape
+        // The Android launcher passes the display's size (NX_TALL_SCREEN=<w>x<h>); elsewhere, the window's.
+        uint32_t ww = 0, wh = 0;
+        const char* screen = std::getenv("NX_TALL_SCREEN");
+        if (!screen || std::sscanf(screen, "%ux%u", &ww, &wh) != 2) plat::window_size(ww, wh);
+        a = std::max(ww, wh), b = std::min(ww, wh);
+    }
+    if (!a || !b) {
+        log("nvn: tall: off, no screen shape (NX_TALL=%s)", e);
+        return r;
+    }
+    int64_t num = 16 * int64_t(b), den = 9 * int64_t(a);
+    if (num * 100 <= den * 102) {  // 16:9 and wider: nothing to do (NX_ULTRAWIDE widens)
+        log("nvn: tall: off, the screen (%u:%u) is not narrower than 16:9", a, b);
+        return r;
+    }
+    if (num * 9 > den * 16) num = 16, den = 9;  // narrower than square: square at most
+    const int64_t g = std::gcd(num, den);
+    r.num = num / g, r.den = den / g;
+    log("nvn: tall: screen %u:%u, 16:9 render targets made %.4fx taller (%lld/%lld)", a, b, double(r.num) / double(r.den),
+        (long long)r.num, (long long)r.den);
+    return r;
+}
+
+const TallRatio& tall_ratio() {
+    static const TallRatio r = init_tall();
+    return r;
+}
+
+}  // namespace
+
+bool g_tall_target = false;
+
+bool tall_on() { return tall_ratio().num > tall_ratio().den; }
+
+float tall_factor() { return float(double(tall_ratio().num) / double(tall_ratio().den)); }
+
+int32_t tall_up(int32_t v) {
+    const TallRatio& r = tall_ratio();
+    const int64_t p = int64_t(v) * r.num;
+    return int32_t(p >= 0 ? p / r.den : -((-p + r.den - 1) / r.den));
+}
+
+int32_t tall_up_end(int32_t v) {
+    const TallRatio& r = tall_ratio();
+    const int64_t p = int64_t(v) * r.num;
+    return int32_t(p >= 0 ? (p + r.den - 1) / r.den : -(-p / r.den));
+}
+
+bool tall_texture(const Texture& t) {
+    if (!tall_on() || t.target != 1 || t.width < 16 || t.height < 9) return false;
+    const double ratio = double(t.width) / double(t.height);
+    if (std::fabs(ratio - k169) / k169 > 0.03) return false;
+    // Render targets (COMPRESSIBLE 0x8) and the window textures (DISPLAY 0x1). Not video (0x2), storage images (0x4),
+    // pitch-linear ones (0x10, 0x40, a stride: the CPU reads or writes them in guest memory at their own size, as the
+    // depth pyramid P5R's occlusion culling reads). NX_TALL_FLAGS0=1 also takes 16:9 textures with no flags (Wonder's
+    // scene colour is one; an uploaded 16:9 picture would then come out black).
+    static const bool flags0 = std::getenv("NX_TALL_FLAGS0") && std::getenv("NX_TALL_FLAGS0")[0] == '1';
+    const bool kind = (t.flags & (0x1 | 0x8)) || (flags0 && t.flags == 0);
+    const bool take = kind && !(t.flags & (0x2 | 0x4 | 0x10 | 0x40)) && !t.stride;
+    static std::mutex lock;
+    static std::map<std::string, int> seen;  // each distinct shape once, taken or not (the study's log)
+    char key[80];
+    std::snprintf(key, sizeof key, "%ux%u f%x fmt%x levels %u%s", t.width, t.height, t.flags, t.format, t.levels,
+                  t.stride ? " linear" : "");
+    {
+        std::lock_guard lk(lock);
+        if (seen[key]++ == 0)
+            log("nvn: tall: %s %s%s", take ? "taller" : "kept 16:9", key,
+                take ? "" : " (not a render target this mode takes)");
+    }
+    return take;
+}
+
+bool tall_ui_target(uint32_t guest_w, uint32_t guest_h) {
+    // The frame targets the game draws its 2D into, at their guest size. P5R: 1280x720 in handheld mode (its post
+    // pass, HUD and menus; the 3D is a 960x540 target), 1920x1080 docked (the 3D at 1440x810).
+    // NX_TALL_UI=<w>x<h>,<w>x<h>,...: other sizes (for a game whose 3D and 2D share a target, none at all: "none").
+    static const std::vector<std::pair<uint32_t, uint32_t>> sizes = [] {
+        std::vector<std::pair<uint32_t, uint32_t>> v;
+        const char* e = std::getenv("NX_TALL_UI");
+        std::string s = e ? e : "1280x720,1920x1080";
+        size_t at = 0;
+        while (at < s.size()) {
+            unsigned w = 0, h = 0;
+            if (std::sscanf(s.c_str() + at, "%ux%u", &w, &h) == 2) v.push_back({w, h});
+            size_t comma = s.find(',', at);
+            if (comma == std::string::npos) break;
+            at = comma + 1;
+        }
+        return v;
+    }();
+    for (const auto& [w, h] : sizes)
+        if (w == guest_w && h == guest_h) return true;
+    return false;
 }
 
 }  // namespace nx::nvn
