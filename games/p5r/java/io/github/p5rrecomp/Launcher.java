@@ -267,7 +267,7 @@ public class Launcher extends Activity {
             }
             Intent launch = new Intent(this, Launcher.class).setAction(Intent.ACTION_MAIN);
             ShortcutInfo info = new ShortcutInfo.Builder(this, "picture_" + System.currentTimeMillis())
-                    .setShortLabel("P5R").setLongLabel("Persona 5 Royal").setIcon(Icon.createWithAdaptiveBitmap(icon))
+                    .setShortLabel("P5R Nova").setLongLabel("Persona 5 Royal").setIcon(Icon.createWithAdaptiveBitmap(icon))
                     .setIntent(launch).build();
             sm.requestPinShortcut(info, null);
             tell(t("Icono", "Icon"), t("Acepta el aviso para poner el acceso directo con tu imagen en la pantalla de inicio. "

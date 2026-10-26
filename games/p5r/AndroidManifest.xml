@@ -19,7 +19,7 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <application
-        android:label="P5R"
+        android:label="P5R Nova"
         android:requestLegacyExternalStorage="true"
         android:hasCode="true"
         android:extractNativeLibs="true"

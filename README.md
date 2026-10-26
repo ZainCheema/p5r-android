@@ -1,5 +1,16 @@
 # Persona 5 Royal for Android (native port)
 
+> [!NOTE]
+> **This is a fork for the Retroid Pocket Nova** (Snapdragon 8 Gen 2 / Adreno 740, 12 GB, Android 13, a 4:3
+> 1280x960 screen). It builds the same native port, with:
+> - the app named **P5R Nova**, with your own launcher icon if you make one (see
+>   [Build and run on a Retroid Nova](#build-and-run-on-a-retroid-nova-macos-or-linux));
+> - narrow-screen support (4:3, 16:10, experimental): the launcher's **Screen shape** option fills the Nova's 4:3
+>   screen instead of showing a 16:9 picture with bars (notes: `docs/nvn/studies/tall-4x3.md`);
+> - a macOS/Linux build script (`games/p5r/tools/build_android.sh`), so no Windows PC is needed to build.
+>
+> Everything below still applies to other Android devices.
+
 An Android app that runs **your own copy** of Persona 5 Royal (Nintendo Switch, version 1.0.0) natively on an arm64
 phone or tablet. The Switch's operating system services, its audio, video and input, and NVN (the Switch's graphics
 API) are reimplemented on Android, with Vulkan for the graphics. The game's own code runs directly on the phone's CPU:
@@ -109,6 +120,49 @@ The APK is signed with your Android debug key (`%USERPROFILE%\.android\debug.key
 androiddebugkey -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -validity 10000`). Without `-Nce` the script
 builds the recompiled flavour, which needs your own recompiled game code in `private\p5r\gen` (see `docs/RECOMP.md`)
 and must never be shared.
+
+## Build and run on a Retroid Nova (macOS or Linux)
+
+`games/p5r/tools/build_android.sh` does the same as `build_android.cmd -Nce -Release` without PowerShell.
+
+**Once:**
+1. The Android SDK (Android Studio's SDK Manager, or `sdkmanager`): platform 35, build-tools 35.0.0, NDK
+   28.2.13676358 and platform-tools (`adb`). The script looks in `ANDROID_HOME`, else `~/Library/Android/sdk`.
+2. A JDK 17 or newer (`javac` on `PATH`, e.g. `brew install openjdk`), and Python 3.
+3. From the repository root:
+   ```sh
+   python3 -m venv private/venv && private/venv/bin/pip install cmake ninja
+   git clone --depth 1 --branch v1.4.357 https://github.com/KhronosGroup/Vulkan-Headers private/third_party/Vulkan-Headers-1.4.357
+   # the shader translator library (Docker running)
+   mkdir -p private/third_party/ryubing
+   curl -L -o private/third_party/ryubing.tar.gz https://codeberg.org/Software_arch/Ryubing/archive/a82350bb77.tar.gz
+   tar -xzf private/third_party/ryubing.tar.gz -C private/third_party/ryubing --strip-components=1
+   docker run --rm -v "$PWD:/src" -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh games/p5r/tools/build_harness_android.sh
+   ```
+4. A debug signing key, if you have none yet (Android Studio makes one):
+   `keytool -genkeypair -keystore ~/.android/debug.keystore -storepass android -keypass android -alias androiddebugkey
+   -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -validity 10000`
+5. On the Nova: Settings → About → tap the build number 7 times, then Developer options → **USB debugging** on. Plug it
+   in, accept the prompt, and check that `adb devices` lists it.
+
+**Optional: your own launcher icon.** `python3 games/p5r/tools/make_nova_icon.py <picture>` (needs Pillow,
+`pip install pillow`) cuts a logo out of a red background and writes the launcher icons to `private/p5r/icon/res`.
+The build uses them instead of the project's icon. They stay in `private/`, which is not committed: don't commit
+official artwork to this repository.
+
+**Build and install:**
+```sh
+games/p5r/tools/build_android.sh --install                    # -> private/p5r/apk_nce/p5r.apk, then adb install
+games/p5r/tools/build_android.sh --install --serial <serial>  # with more than one device attached (adb devices)
+games/p5r/tools/build_android.sh --dev                        # without NX_RELEASE: keeps nx.log and the diagnostics
+```
+The first build compiles the runtime (a few minutes); after that only what changed is rebuilt. Reinstalling keeps your
+keys, shaders and saves.
+
+**Run:** open **P5R Nova** on the Nova and follow [Install](#install) from step 3 (game file, keys, Prepare the game,
+Play). For the full 4:3 screen, set **Screen shape** to **Fill 4:3 and 16:10 screens (experimental)** in the
+options. To watch the log while
+it runs: `adb logcat -s p5r:V`.
 
 ## Reporting problems
 
